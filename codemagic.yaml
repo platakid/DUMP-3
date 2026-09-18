@@ -1,0 +1,40 @@
+workflows:
+  dump-ios-unsigned:
+    name: DUMP - Unsigned device IPA (no signing, sign later yourself)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      xcode: latest
+    scripts:
+      - name: Check project and resolve Swift packages
+        script: bash ci/codemagic.sh prepare
+
+      - name: Build and run XCTest on simulator (sanity check)
+        script: bash ci/codemagic.sh test
+
+      - name: Archive for iOS device, code signing disabled
+        script: |
+          set -euo pipefail
+          xcodebuild archive \
+            -project DUMP.xcodeproj \
+            -scheme DUMP \
+            -sdk iphoneos \
+            -archivePath build/ios/DUMP.xcarchive \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM=""
+
+      - name: Package the unsigned .app into a proper .ipa
+        script: |
+          set -euo pipefail
+          mkdir -p build/ios/ipa/Payload
+          cp -r "build/ios/DUMP.xcarchive/Products/Applications/DUMP.app" build/ios/ipa/Payload/
+          cd build/ios/ipa
+          zip -r DUMP-unsigned.ipa Payload
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - build/results/*.xcresult
+      - build/logs/*.log
