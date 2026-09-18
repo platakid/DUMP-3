@@ -9,34 +9,49 @@ protocol DeviceAuthenticating: AnyObject {
     func cancel()
 }
 
+
+// MARK: - Device Authentication
+
 @MainActor
-final class DeviceAuthentication:
-    DeviceAuthenticating {
+final class DeviceAuthentication: DeviceAuthenticating {
 
     private var context: LAContext?
+
 
     func authenticate() async throws -> Bool {
 
         /*
-         Invalidate any genuinely old authentication context before
-         beginning a new Gate 1 request.
-         */
+         Invalidate any previous authentication operation before
+         creating a new Gate 1 request.
+        */
+
         cancel()
 
         let current = LAContext()
 
         /*
-         Don't allow Touch ID reuse from an earlier authentication.
+         Prevent Touch ID authentication from being automatically
+         reused from a recent successful authentication.
+        */
 
-         This property affects Touch ID; Face ID authentication is
-         still handled normally by LocalAuthentication.
-         */
         current.touchIDAuthenticationAllowableReuseDuration = 0
 
         /*
-         Give iOS an explicit cancel-button label.
-         */
+         Explicit system authentication cancel button.
+        */
+
         current.localizedCancelTitle = "Cancel"
+
+        /*
+         We intentionally do NOT configure a passcode fallback.
+
+         Gate 1 is biometric-only.
+
+         The vault password remains the independent cryptographic
+         Gate 2 and is never replaced by biometric authentication.
+        */
+
+        current.localizedFallbackTitle = ""
 
         context = current
 
@@ -47,26 +62,83 @@ final class DeviceAuthentication:
             }
         }
 
+
+        // MARK: Check availability
+
+        var error: NSError?
+
         /*
-         deviceOwnerAuthentication allows the normal iOS
-         authentication flow.
+         deviceOwnerAuthenticationWithBiometrics means:
 
-         On Face ID devices, Face ID is presented first.
-         iOS may provide the device-passcode fallback according to
-         system authentication policy.
+         Face ID / Touch ID only.
 
-         Most importantly, PrivacyDelegate no longer invalidates this
-         LAContext merely because the system authentication UI caused
-         the app to temporarily resign active.
-         */
-        return try await current.evaluatePolicy(
-            .deviceOwnerAuthentication,
+         The device passcode does NOT satisfy this Gate 1 request.
+
+         This is deliberately different from:
+
+             .deviceOwnerAuthentication
+
+         which allows iOS to use the device passcode as a fallback.
+        */
+
+        guard current.canEvaluatePolicy(
+            .deviceOwnerAuthenticationWithBiometrics,
+            error: &error
+        ) else {
+
+            /*
+             Fail closed.
+
+             We do not downgrade automatically to the device passcode
+             when biometric authentication is unavailable.
+            */
+
+            if let error {
+                throw error
+            }
+
+            throw VaultError.locked
+        }
+
+
+        // MARK: Authenticate
+
+        let success = try await current.evaluatePolicy(
+            .deviceOwnerAuthenticationWithBiometrics,
             localizedReason:
                 "Authenticate to continue."
         )
+
+        /*
+         evaluatePolicy normally throws on failure, but explicitly
+         require a true result anyway.
+        */
+
+        guard success else {
+            throw VaultError.locked
+        }
+
+        /*
+         AppModel performs its own generation/session checks after
+         this returns, protecting against a successful authentication
+         callback arriving after lock().
+        */
+
+        return true
     }
 
+
+    // MARK: Cancel
+
     func cancel() {
+
+        /*
+         invalidate() causes an outstanding LocalAuthentication
+         evaluation to fail.
+
+         AppModel's generation checks remain the authoritative
+         protection against stale asynchronous results.
+        */
 
         context?.invalidate()
 
